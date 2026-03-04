@@ -4,17 +4,23 @@ set -e
 echo "=== ATM Monitor Setup ==="
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VENV_DIR="$SCRIPT_DIR/venv"
 
-# 1. Install Python dependencies
+# 1. Create venv if needed, then install dependencies
 echo ""
-echo "[1/3] Installing Python packages..."
-pip3 install -r requirements.txt
+echo "[1/3] Setting up Python environment..."
+if [ ! -d "$VENV_DIR" ]; then
+    python3 -m venv "$VENV_DIR"
+    echo "  Created virtualenv at $VENV_DIR"
+fi
+"$VENV_DIR/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"
+echo "  Packages installed."
 
 # 2. Create .env if it doesn't exist
 echo ""
 echo "[2/3] Checking .env..."
-if [ ! -f .env ]; then
-    cp .env.example .env
+if [ ! -f "$SCRIPT_DIR/.env" ]; then
+    cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
     echo "  Created .env from .env.example"
     echo "  *** Open .env and fill in your credentials before running. ***"
 else
@@ -27,7 +33,7 @@ echo "[3/3] Setting up systemd service..."
 if ! command -v systemctl &>/dev/null; then
     echo "  systemd not found (not Linux?) — skipping."
 else
-    PYTHON_BIN="$(which python3)"
+    PYTHON_BIN="$VENV_DIR/bin/python3"
     SERVICE_FILE="/etc/systemd/system/atm-mon.service"
 
     sudo tee "$SERVICE_FILE" > /dev/null <<EOF
