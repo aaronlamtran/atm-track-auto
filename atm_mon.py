@@ -127,16 +127,32 @@ def get_balance():
     from selenium import webdriver
     from selenium.webdriver.common.by import By
     from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+    import shutil
 
     options = Options()
-    options.add_argument("--headless")
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--remote-debugging-port=0")
     options.add_argument("--window-size=1280,800")
 
-    driver = webdriver.Chrome(options=options)  # Selenium 4.6+ auto-manages ChromeDriver
+    # On Raspberry Pi, apt installs chromedriver system-wide; use it directly.
+    # On other platforms, Selenium Manager auto-downloads the right driver.
+    system_chromedriver = shutil.which("chromedriver")
+    if system_chromedriver:
+        service = Service(system_chromedriver)
+        # Also point to system Chromium if present (Pi uses chromium-browser)
+        system_chromium = shutil.which("chromium-browser") or shutil.which("chromium")
+        if system_chromium:
+            options.binary_location = system_chromium
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        driver = webdriver.Chrome(options=options)  # Selenium Manager handles it
     wait   = WebDriverWait(driver, 20)
 
     try:
