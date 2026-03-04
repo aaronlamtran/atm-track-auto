@@ -1,7 +1,7 @@
 .env
 atm_state.json
-atm_login_debug.png
-atm_balance_debug.png
+atm_login_debug.*
+atm_balance_debug.*
 __pycache__/
 *.pyc
 venv*

@@ -5,17 +5,16 @@ Monitors your TMS portal and alerts you on EVERY balance change under $2,000.
 
 Setup (one-time):
   bash setup.sh
-
-ChromeDriver is downloaded automatically via Selenium Manager (built into Selenium 4.6+).
 """
 
-import sys
 import schedule
 import time
 import smtplib
 import json
 import os
 import re
+import requests
+from bs4 import BeautifulSoup
 from email.mime.text import MIMEText
 from datetime import datetime
 from dotenv import load_dotenv
@@ -50,6 +49,21 @@ if _missing:
 
 STATE_FILE = "atm_state.json"
 last_known_balance = None
+
+# Persistent session — reuses cookies so we only log in when the session expires
+_session = None
+
+
+def get_session():
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers["User-Agent"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    return _session
 
 
 class LoginIssue(Exception):
@@ -89,7 +103,7 @@ def send_alert(subject, body):
             "  [Alert FAILED] Yahoo rejected the login.\n"
             "  Your App Password may be expired or wrong.\n"
             "  Fix: Yahoo Account → Security → App Passwords → generate a new one\n"
-            "  Then update SMTP_PASSWORD in this script."
+            "  Then update SMTP_PASSWORD in .env."
         )
     except smtplib.SMTPRecipientsRefused as e:
         print(
@@ -104,13 +118,12 @@ def send_alert(subject, body):
             f"  Detail: {e}"
         )
     except smtplib.SMTPException as e:
-        # Catches 554 and other SMTP-level errors (server-side rejection)
         code = e.smtp_code if hasattr(e, "smtp_code") else "?"
         print(
             f"  [Alert FAILED] SMTP error {code}: {e}\n"
             f"  This is usually a server-side rejection (554 = delivery refused).\n"
             f"  Common causes: expired App Password, Yahoo spam filter, or blocked recipient.\n"
-            f"  Check SMTP_EMAIL / SMTP_PASSWORD / ALERT_TO in the script."
+            f"  Check SMTP_EMAIL / SMTP_PASSWORD / ALERT_TO in .env."
         )
     except OSError as e:
         print(
@@ -124,159 +137,125 @@ def parse_balance(text):
     return float(cleaned) if cleaned else None
 
 
-def get_balance():
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    import shutil
+def _do_login(session):
+    """Log in to TMS. Raises LoginIssue on any auth problem."""
+    # Load login page — grab ASP.NET hidden fields (ViewState, EventValidation, etc.)
+    resp = session.get(ATM_LOGIN_URL, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-    options = Options()
-    if sys.platform == "linux":
-        # Raspberry Pi headless: Chromium tries to init EGL (hardware GPU) which
-        # requires an X display — even in headless mode. Fix:
-        #   --ozone-platform=headless  → use Chromium's built-in headless display
-        #   --use-gl=swiftshader       → software renderer, no X/EGL needed
-        options.add_argument("--headless")
-        options.add_argument("--ozone-platform=headless")
-        options.add_argument("--use-gl=swiftshader")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-    # macOS: run with a visible browser (headless crashes on ARM Mac)
-    options.add_argument("--window-size=1280,800")
+    form = soup.find("form")
+    payload = {}
+    for inp in form.find_all("input"):
+        name = inp.get("name")
+        if not name:
+            continue
+        inp_type = inp.get("type", "text").lower()
+        # Only send the Login button, not Reset/BtnDontReset/HiddenButton2
+        if inp_type == "submit" and name != "ctl00$BodyContent$LoginButton":
+            continue
+        payload[name] = inp.get("value", "")
 
-    # On Raspberry Pi, chromedriver may not be in PATH — check common install locations.
-    # On other platforms, Selenium Manager auto-downloads the right driver.
-    CHROMEDRIVER_CANDIDATES = [
-        shutil.which("chromedriver"),               # in PATH (some Pi OS versions)
-        "/usr/lib/chromium-browser/chromedriver",   # Raspberry Pi OS (Bullseye/Bookworm)
-        "/usr/bin/chromedriver",                    # Debian/Ubuntu
-        "/usr/lib/chromium/chromedriver",           # some Debian variants
-    ]
-    CHROMIUM_CANDIDATES = [
-        shutil.which("chromium-browser"),
-        shutil.which("chromium"),
-        "/usr/bin/chromium-browser",
-        "/usr/bin/chromium",
-    ]
+    # ASP.NET form names use $ instead of _
+    payload["ctl00$BodyContent$UserName"] = ATM_USERNAME
+    payload["ctl00$BodyContent$Password"] = ATM_PASSWORD
 
-    system_chromedriver = next((p for p in CHROMEDRIVER_CANDIDATES if p and os.path.exists(p)), None)
-    system_chromium     = next((p for p in CHROMIUM_CANDIDATES     if p and os.path.exists(p)), None)
+    resp = session.post(ATM_LOGIN_URL, data=payload, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-    if system_chromedriver:
-        print(f"  [Driver] Using system chromedriver: {system_chromedriver}")
-        service = Service(system_chromedriver)
-        if system_chromium:
-            options.binary_location = system_chromium
-        driver = webdriver.Chrome(service=service, options=options)
-    else:
-        driver = webdriver.Chrome(options=options)  # Selenium Manager handles it
-    wait   = WebDriverWait(driver, 20)
+    # Detect password expiration notice — auto-click "Remind me later" to proceed.
+    # TMS shows this in a fresh session even if you've dismissed it in the browser.
+    # BtnDontReset is an <input type="submit">, so we submit it as a normal button
+    # (not via __EVENTTARGET which is only for LinkButtons).
+    if soup.find(id="ctl00_BodyContent_BtnDontReset"):
+        print("  [Auth] Password expiration notice — clicking 'Remind me later'...")
+        form = soup.find("form")
+        remind_payload = {}
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            if not name:
+                continue
+            inp_type = inp.get("type", "text").lower()
+            # Browsers only send the clicked submit button — exclude all others
+            if inp_type == "submit" and name != "ctl00$BodyContent$BtnDontReset":
+                continue
+            remind_payload[name] = inp.get("value", "")
+        resp = session.post(resp.url, data=remind_payload, timeout=30)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-    try:
-        # ── 1. Load login page ─────────────────────────────────────────────
-        driver.get(ATM_LOGIN_URL)
-        wait.until(EC.presence_of_element_located((By.ID, "ctl00_BodyContent_UserName")))
-
-        # ── 2. Enter credentials and submit ───────────────────────────────
-        driver.find_element(By.ID, "ctl00_BodyContent_UserName").send_keys(ATM_USERNAME)
-        driver.find_element(By.ID, "ctl00_BodyContent_Password").send_keys(ATM_PASSWORD)
-        driver.find_element(By.ID, "ctl00_BodyContent_LoginButton").click()
-        time.sleep(3)
-
-        # ── 3. Detect password expiration popup ───────────────────────────
-        # TMS shows a modal with id="ctl00_BodyContent_ExpiredPasswordPanel"
-        # when the password is about to expire. It has two buttons:
-        #   "Reset Password"  → id="ctl00_BodyContent_BtnReset"
-        #   "Remind me later" → id="ctl00_BodyContent_BtnDontReset"
-        # We detect it here and alert you to act manually.
-        try:
-            expire_panel = driver.find_element(By.ID, "ctl00_BodyContent_ExpiredPasswordPanel")
-            if expire_panel.is_displayed():
-                try:
-                    expire_msg = driver.find_element(
-                        By.ID, "ctl00_BodyContent_PasswordExpireMessage"
-                    ).text.strip()
-                except Exception:
-                    expire_msg = "(message not readable)"
-
+    # Detect login failure
+    for error_id in ["ctl00_BodyContent_InvalidLogin", "ctl00_BodyContent_ErrorLabel"]:
+        el = soup.find(id=error_id)
+        if el:
+            err_text = el.get_text(strip=True)
+            if err_text:
                 raise LoginIssue(
-                    "PASSWORD_EXPIRING",
-                    f"⚠️  Your TMS password is expiring soon.\n"
-                    f"  TMS message: \"{expire_msg}\"\n\n"
-                    f"  Log in manually and click 'Reset Password' to update it\n"
-                    f"  before it fully expires and locks you out."
+                    "LOGIN_FAILED",
+                    f"🚫 TMS login failed.\n"
+                    f"  Error shown: \"{err_text}\"\n"
+                    f"  Check your ATM_USERNAME / ATM_PASSWORD in .env.\n"
+                    f"  Also check if your account is locked."
                 )
-        except LoginIssue:
-            raise
-        except Exception:
-            pass  # Panel not visible — normal, continue
 
-        # ── 4. Detect login failure ────────────────────────────────────────
-        # TMS shows errors in #ctl00_BodyContent_InvalidLogin (bold red)
-        # and #ctl00_BodyContent_ErrorLabel for other errors
-        for error_id in ["ctl00_BodyContent_InvalidLogin", "ctl00_BodyContent_ErrorLabel"]:
-            try:
-                err_text = driver.find_element(By.ID, error_id).text.strip()
-                if err_text:
-                    raise LoginIssue(
-                        "LOGIN_FAILED",
-                        f"🚫 TMS login failed.\n"
-                        f"  Error shown: \"{err_text}\"\n"
-                        f"  Check your ATM_USERNAME / ATM_PASSWORD in the script.\n"
-                        f"  Also check if your account is locked."
-                    )
-            except LoginIssue:
-                raise
-            except Exception:
-                pass
+    if "Login.aspx" in resp.url:
+        with open("atm_login_debug.html", "w") as f:
+            f.write(resp.text)
+        raise LoginIssue(
+            "LOGIN_STUCK",
+            f"🚫 Still on the login page after submitting.\n"
+            f"  This usually means wrong credentials or an unexpected prompt.\n"
+            f"  HTML saved: atm_login_debug.html"
+        )
 
-        # ── 5. Confirm we left the login page ─────────────────────────────
-        if "Login.aspx" in driver.current_url:
-            driver.save_screenshot("atm_login_debug.png")
-            raise LoginIssue(
-                "LOGIN_STUCK",
-                f"🚫 Still on the login page after submitting.\n"
-                f"  This usually means wrong credentials or an unexpected prompt.\n"
-                f"  Screenshot saved: atm_login_debug.png"
-            )
 
-        # ── 6. Go directly to this terminal's detail page ─────────────────
-        driver.get(ATM_TERMINAL_URL)
+def _parse_balance_from_page(soup):
+    """Extract balance from cassettes grid. Returns balance text or None."""
+    try:
+        table = soup.find(id="ctl00_BodyContent_CassettesGridView")
+        return table.find_all("tr")[1].find_all("td")[4].get_text(strip=True)
+    except Exception:
+        return None
 
-        # ── 7. Read the cash balance from the cassettes grid ──────────────
-        # Row 2, column 5 of the CassettesGridView table
-        try:
-            balance_el = wait.until(
-                EC.presence_of_element_located(
-                    (By.XPATH, '//*[@id="ctl00_BodyContent_CassettesGridView"]/tbody/tr[2]/td[5]')
-                )
-            )
-            balance_text = balance_el.text.strip()
-        except Exception:
-            driver.save_screenshot("atm_balance_debug.png")
-            raise LoginIssue(
-                "BALANCE_NOT_FOUND",
-                f"⚠️  Logged in but couldn't find the balance field on the terminal page.\n"
-                f"  URL used: {ATM_TERMINAL_URL}\n"
-                f"  Screenshot saved: atm_balance_debug.png\n"
-                f"  Make sure ATM_TERMINAL_URL points to your specific terminal's detail page."
-            )
 
-        if not balance_text:
-            raise ValueError("Balance element was empty — terminal page may still be loading.")
+def get_balance():
+    global _session
+    session = get_session()
 
-        balance = parse_balance(balance_text)
-        if balance is None:
-            raise ValueError(f"Could not parse a number from: '{balance_text}'")
+    # ── 1. Try terminal page directly (reuses session if already logged in) ──
+    resp = session.get(ATM_TERMINAL_URL, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-        return balance
+    # If redirected to login, authenticate then retry
+    if "Login.aspx" in resp.url:
+        print("  [Auth] Session expired — logging in...")
+        _do_login(session)
+        resp = session.get(ATM_TERMINAL_URL, timeout=30)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-    finally:
-        driver.quit()
+    # ── 2. Parse balance ───────────────────────────────────────────────────
+    balance_text = _parse_balance_from_page(soup)
+    if balance_text is None:
+        with open("atm_balance_debug.html", "w") as f:
+            f.write(resp.text)
+        raise LoginIssue(
+            "BALANCE_NOT_FOUND",
+            f"⚠️  Logged in but couldn't find the balance on the terminal page.\n"
+            f"  URL: {ATM_TERMINAL_URL}\n"
+            f"  HTML saved: atm_balance_debug.html"
+        )
+
+    if not balance_text:
+        raise ValueError("Balance element was empty.")
+
+    balance = parse_balance(balance_text)
+    if balance is None:
+        raise ValueError(f"Could not parse a number from: '{balance_text}'")
+
+    return balance
 
 
 def check_balance():
