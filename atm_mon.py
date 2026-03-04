@@ -9,6 +9,7 @@ Setup (one-time):
 ChromeDriver is downloaded automatically via Selenium Manager (built into Selenium 4.6+).
 """
 
+import sys
 import schedule
 import time
 import smtplib
@@ -133,12 +134,13 @@ def get_balance():
     import shutil
 
     options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--remote-debugging-port=0")
+    if sys.platform == "linux":
+        # Raspberry Pi / Linux: run headless (no display available)
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+    # macOS: run with a visible browser (headless crashes on ARM Mac)
     options.add_argument("--window-size=1280,800")
 
     # On Raspberry Pi, apt installs chromedriver system-wide; use it directly.
