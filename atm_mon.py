@@ -135,11 +135,14 @@ def get_balance():
 
     options = Options()
     if sys.platform == "linux":
-        # Raspberry Pi / Linux: run headless (no display available)
+        # Raspberry Pi: run headless, single-process (Pi can't handle Chrome's
+        # multi-process model — spawning renderer/GPU subprocesses crashes it)
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
+        options.add_argument("--single-process")
+        options.add_argument("--disable-features=VizDisplayCompositor")
     # macOS: run with a visible browser (headless crashes on ARM Mac)
     options.add_argument("--window-size=1280,800")
 
