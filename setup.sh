@@ -45,6 +45,7 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=$SCRIPT_DIR
 ExecStart=$PYTHON_BIN $SCRIPT_DIR/atm_mon.py
+Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
 RestartSec=30
 
