@@ -139,7 +139,7 @@ def get_balance():
         # requires an X display — even in headless mode. Fix:
         #   --ozone-platform=headless  → use Chromium's built-in headless display
         #   --use-gl=swiftshader       → software renderer, no X/EGL needed
-        options.add_argument("--headless=new")
+        options.add_argument("--headless")
         options.add_argument("--ozone-platform=headless")
         options.add_argument("--use-gl=swiftshader")
         options.add_argument("--no-sandbox")
