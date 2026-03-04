@@ -143,13 +143,27 @@ def get_balance():
     # macOS: run with a visible browser (headless crashes on ARM Mac)
     options.add_argument("--window-size=1280,800")
 
-    # On Raspberry Pi, apt installs chromedriver system-wide; use it directly.
+    # On Raspberry Pi, chromedriver may not be in PATH — check common install locations.
     # On other platforms, Selenium Manager auto-downloads the right driver.
-    system_chromedriver = shutil.which("chromedriver")
+    CHROMEDRIVER_CANDIDATES = [
+        shutil.which("chromedriver"),               # in PATH (some Pi OS versions)
+        "/usr/lib/chromium-browser/chromedriver",   # Raspberry Pi OS (Bullseye/Bookworm)
+        "/usr/bin/chromedriver",                    # Debian/Ubuntu
+        "/usr/lib/chromium/chromedriver",           # some Debian variants
+    ]
+    CHROMIUM_CANDIDATES = [
+        shutil.which("chromium-browser"),
+        shutil.which("chromium"),
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+    ]
+
+    system_chromedriver = next((p for p in CHROMEDRIVER_CANDIDATES if p and os.path.exists(p)), None)
+    system_chromium     = next((p for p in CHROMIUM_CANDIDATES     if p and os.path.exists(p)), None)
+
     if system_chromedriver:
+        print(f"  [Driver] Using system chromedriver: {system_chromedriver}")
         service = Service(system_chromedriver)
-        # Also point to system Chromium if present (Pi uses chromium-browser)
-        system_chromium = shutil.which("chromium-browser") or shutil.which("chromium")
         if system_chromium:
             options.binary_location = system_chromium
         driver = webdriver.Chrome(service=service, options=options)
