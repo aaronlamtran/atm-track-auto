@@ -19,7 +19,7 @@ else
     echo "  .env already exists, skipping."
 fi
 
-# 3. Install Chromium + ChromeDriver (Raspberry Pi / Debian)
+# 3. Install or update Chromium + ChromeDriver (Raspberry Pi / Debian)
 echo ""
 echo "[3/3] Checking for Chromium..."
 if ! command -v chromium-browser &>/dev/null && ! command -v chromium &>/dev/null; then
@@ -28,7 +28,22 @@ if ! command -v chromium-browser &>/dev/null && ! command -v chromium &>/dev/nul
     sudo apt-get install -y chromium-browser chromium-chromedriver
     echo "  Chromium installed."
 else
-    echo "  Chromium already installed."
+    # Show installed version
+    INSTALLED=$(chromium-browser --version 2>/dev/null || chromium --version 2>/dev/null)
+    echo "  Installed: $INSTALLED"
+
+    # Check if an upgrade is available via apt
+    sudo apt-get update -qq
+    UPGRADABLE=$(apt-get --just-print upgrade 2>/dev/null \
+        | grep -E "^Inst (chromium-browser|chromium) " || true)
+
+    if [ -n "$UPGRADABLE" ]; then
+        echo "  Update available — upgrading Chromium..."
+        sudo apt-get install -y chromium-browser chromium-chromedriver
+        echo "  Chromium updated: $(chromium-browser --version 2>/dev/null || chromium --version 2>/dev/null)"
+    else
+        echo "  Chromium is up to date."
+    fi
 fi
 
 echo ""
