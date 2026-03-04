@@ -7,6 +7,7 @@ Setup (one-time):
   bash setup.sh
 """
 
+import socket
 import schedule
 import time
 import smtplib
@@ -283,6 +284,7 @@ def check_balance():
                     f"{change_str}"
                     f"  Time:    {now}\n"
                     f"  Status:  BELOW ${ALERT_THRESHOLD:,} threshold\n"
+                    f"  From:    {socket.gethostname()}\n"
                 )
                 send_alert(subject, body)
             else:
